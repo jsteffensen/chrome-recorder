@@ -42,12 +42,117 @@ try {
 // ---------- settings ----------
 const SPEED = Number(process.env.SPEED) || 1;
 const FIND_TIMEOUT = 10000; // how long to wait for an element to show up
+const SHOW_CLICKS = process.env.CLICK_INDICATOR !== 'off'; // amber circle at every click
+const SHOW_CURSOR = process.env.VIRTUAL_CURSOR !== 'off';  // a mouse cursor that glides to every click
+const CURSOR_TRAVEL = 1000; // ms before a click at which the cursor starts moving towards it (scaled by SPEED)
 const NAV_TIMEOUT = 30000;  // how long to wait for a page load
 const START_DELAY = 200;    // ms between the key press and the first action (fixed, not affected by SPEED)
 
 const ACTIONS = new Set(['click', 'fill', 'select', 'key']);
 const isAction = (e) => ACTIONS.has(e.type);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------- click indicator and virtual cursor ----------
+// These two functions run inside the page (Puppeteer serializes them and sends them to the browser),
+// so they must not use anything from this file.
+
+// Every mouse press draws an amber circle that grows from nothing to 75 px and fades out, 500 ms in
+// total. It ignores the mouse, so it never gets in the way of a click.
+function installClickIndicator() {
+  window.addEventListener('mousedown', (e) => {
+    const size = 75;
+    const dot = document.createElement('div');
+    Object.assign(dot.style, {
+      position: 'fixed',
+      left: e.clientX - size / 2 + 'px',
+      top: e.clientY - size / 2 + 'px',
+      width: size + 'px',
+      height: size + 'px',
+      boxSizing: 'border-box',
+      borderRadius: '50%',
+      background: 'rgba(255, 170, 0, 0.85)',
+      border: '2px solid rgba(214, 110, 0, 0.95)',
+      pointerEvents: 'none',
+      zIndex: '2147483646', // just below the cursor
+    });
+    document.documentElement.appendChild(dot);
+    const remove = () => dot.remove();
+    const animation = dot.animate(
+      [
+        { transform: 'scale(0)', opacity: 1, offset: 0 },
+        { transform: 'scale(1)', opacity: 0.85, offset: 0.4 }, // quick growth
+        { transform: 'scale(1)', opacity: 0, offset: 1 },      // then fade away
+      ],
+      { duration: 500, easing: 'ease-out' }
+    );
+    animation.onfinish = remove;
+    setTimeout(remove, 800); // safety net
+  }, true);
+}
+
+// The virtual cursor: an arrow that stays where it is until it is told to glide somewhere else.
+// It is created on first use at `from` (the middle of the window if that is null), then glides to `to`
+// over `ms` milliseconds. With ms = 0 it jumps.
+function moveCursorInPage(from, to, ms) {
+  const at = (p) => 'translate(' + (p.x - 4) + 'px, ' + (p.y - 2) + 'px)'; // the arrow's tip is at (4, 2) in its image
+  let cursor = document.getElementById('__replay_cursor');
+  if (!cursor) {
+    from = from || { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    cursor = document.createElement('div');
+    cursor.id = '__replay_cursor';
+    Object.assign(cursor.style, {
+      position: 'fixed',
+      left: '0',
+      top: '0',
+      width: '24px',
+      height: '24px',
+      pointerEvents: 'none',
+      zIndex: '2147483647',
+      filter: 'drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45))',
+      transform: at(from),
+    });
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('width', '24');
+    svg.setAttribute('height', '24');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    const arrow = document.createElementNS(ns, 'path');
+    arrow.setAttribute('d', 'M4 2 L4 20 L8.6 15.6 L11.6 22 L14.4 20.8 L11.5 14.6 L17.8 14.4 Z');
+    arrow.setAttribute('fill', '#111');
+    arrow.setAttribute('stroke', '#fff');
+    arrow.setAttribute('stroke-width', '1.5');
+    arrow.setAttribute('stroke-linejoin', 'round');
+    svg.appendChild(arrow);
+    cursor.appendChild(svg);
+    document.documentElement.appendChild(cursor);
+  }
+  cursor.style.transition = 'none';
+  cursor.getBoundingClientRect(); // make the current position final before animating away from it
+  if (ms > 0) cursor.style.transition = 'transform ' + ms + 'ms cubic-bezier(0.4, 0, 0.2, 1)';
+  cursor.style.transform = at(to);
+}
+
+let cursorPoint = null; // where the virtual cursor sits (null until the first click)
+
+// A full page load throws the cursor away, so put it back where it was
+async function placeCursor(page) {
+  if (!SHOW_CURSOR || !cursorPoint) return;
+  try { await page.evaluate(moveCursorInPage, cursorPoint, cursorPoint, 0); } catch { /* decoration only */ }
+}
+
+// Glide the cursor to the middle of `el` and wait until it has arrived
+async function glideCursor(page, el, ms) {
+  if (!SHOW_CURSOR) return;
+  try {
+    await el.scrollIntoView();
+    const box = await el.boundingBox();
+    if (!box) return;
+    const to = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await page.evaluate(moveCursorInPage, cursorPoint, to, ms);
+    cursorPoint = to;
+    if (ms > 0) await sleep(ms);
+  } catch { /* the cursor is decoration; never fail a replay because of it */ }
+}
 
 // ---------- helpers ----------
 
@@ -98,12 +203,20 @@ async function find(page, selectors) {
 
 // Run an action and, if it triggers a full page load, wait for that load to finish.
 async function withNavigation(page, nav, action) {
-  if (nav) await Promise.all([page.waitForNavigation({ waitUntil: 'load', timeout: NAV_TIMEOUT }), action()]);
-  else await action();
+  if (nav) {
+    await Promise.all([page.waitForNavigation({ waitUntil: 'load', timeout: NAV_TIMEOUT }), action()]);
+    await placeCursor(page);
+  } else {
+    await action();
+  }
 }
 
-async function click(page, selectors, nav) {
-  const el = await find(page, selectors);
+async function click(page, selectors, nav, travelMs) {
+  let el = await find(page, selectors);
+  if (SHOW_CURSOR) {
+    await glideCursor(page, el, travelMs);
+    el = await find(page, selectors); // the page may have re-rendered while the cursor was gliding
+  }
   await withNavigation(page, nav, () => el.click());
 }
 
@@ -179,17 +292,20 @@ async function replay(page) {
   let navExpected = false;     // an earlier action is already waiting for the next page load
   let justStarted = false;     // the user just pressed a key; the recorded pause is meaningless
 
-  // Waits before an action and returns how many ms it actually waited
-  const pause = async (t) => {
+  // Waits before an action. The last `lead` ms of the pause are not slept but left to the caller
+  // (the cursor gliding to the click). Returns the whole pause and the part that was left over.
+  const pause = async (t, lead = 0) => {
+    let total;
     if (justStarted) {
       // The recorded pause includes time the player spent waiting for the key press, so use a fixed delay
       justStarted = false;
-      await sleep(START_DELAY);
-      return START_DELAY;
+      total = START_DELAY;
+    } else {
+      total = base == null ? 0 : Math.max(0, t - base) / SPEED;
     }
-    const ms = base == null ? 0 : Math.max(0, t - base) / SPEED;
-    if (ms >= 50 / SPEED) await sleep(ms);
-    return ms;
+    const travel = Math.min(lead, total);
+    if (total >= 50 / SPEED && total > travel) await sleep(total - travel);
+    return { total, travel };
   };
 
   for (let i = 0; i < events.length; i++) {
@@ -207,6 +323,7 @@ async function replay(page) {
         await pause(e.t);
         console.log(`Opening ${e.url}`);
         await page.goto(e.url, { waitUntil: 'load', timeout: NAV_TIMEOUT });
+        await placeCursor(page);
       }
       navExpected = false;
       base = e.t;
@@ -222,7 +339,8 @@ async function replay(page) {
 
     if (!isAction(e)) continue;
 
-    const waited = await pause(e.t);
+    const lead = e.type === 'click' && SHOW_CURSOR ? CURSOR_TRAVEL / SPEED : 0;
+    const { total: waited, travel } = await pause(e.t, lead);
     const nav = causesNavigation(i);
     const selectors = e.selectors || [];
     const isPassword = e.type === 'fill' && e.value === '__PASSWORD__';
@@ -234,7 +352,7 @@ async function replay(page) {
 
     switch (e.type) {
       case 'click':
-        await click(page, selectors, nav);
+        await click(page, selectors, nav, travel);
         break;
       case 'fill': {
         let value = e.value;
@@ -346,6 +464,7 @@ function chooseChrome() {
   try {
     const [first] = await browser.pages();
     const page = first || (await browser.newPage());
+    if (SHOW_CLICKS) await page.evaluateOnNewDocument(installClickIndicator); // active on every page we open from here on
     await replay(page);
     console.log('Done. The browser stays open; close it (or press Ctrl+C) to exit.');
   } catch (err) {

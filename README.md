@@ -52,7 +52,10 @@ node player.js <recording.json>
 1. Finds a Chrome to use (see [Which Chrome is used](#which-chrome-is-used)) and opens it.
 2. Opens the first recorded page and waits. When it says `Page loaded. Press any key to start the replay...`, get the page into the state you want (for example, log in by hand if needed), then press a key in the terminal. `Ctrl+C` cancels.
 3. Runs 200 ms after your key press, then repeats every recorded action with the original pauses.
-4. **Leaves the browser open** when it finishes, so you can look at the result. Close the window or press `Ctrl+C` to exit. If a step fails, the browser also stays open so you can see where it stopped.
+4. **Shows what it is doing**, so the replay looks like a screen recording:
+   - A **virtual cursor** (an arrow) sits on the page. It stays where the last click happened, and starts gliding to the next click 1000 ms before it (less if the pause is shorter, and scaled by `SPEED`). Before the first click it starts in the middle of the window.
+   - Every click draws an **amber circle** that grows from nothing to 75 px and fades out over 500 ms.
+5. **Leaves the browser open** when it finishes, so you can look at the result. Close the window or press `Ctrl+C` to exit. If a step fails, the browser also stays open so you can see where it stopped.
 
 Each step is printed as it runs, for example `[2/4] fill "#urgent" (after 1225 ms)`.
 
@@ -64,6 +67,8 @@ There are no command-line options besides the recording file. These environment 
 | --- | --- |
 | `SPEED=2` | Replay at twice the recorded speed (`0.5` = half speed). The 200 ms start delay is not affected. |
 | `PASSWORD=...` | Text typed into password fields (see [Privacy](#privacy)) |
+| `VIRTUAL_CURSOR=off` | Don't show the gliding mouse cursor |
+| `CLICK_INDICATOR=off` | Don't draw the amber circle at each click |
 | `PUPPETEER_EXECUTABLE_PATH=...` | Use this exact Chrome |
 | `PUPPETEER_CACHE_DIR=...` | Look for Puppeteer's downloaded Chrome here instead of `~/.cache/puppeteer` |
 
