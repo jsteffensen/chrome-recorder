@@ -1,5 +1,7 @@
 # Chrome Recorder
 
+![A recording being replayed in Chrome: a virtual cursor moves through the Graphnote demo app while Puppeteer repeats the recorded clicks and typing](recording.gif)
+
 Record your clicks, typing and **timing** in Chrome, then replay them with [Puppeteer](https://pptr.dev) at the same pace.
 
 Chrome's built-in DevTools Recorder can export Puppeteer scripts, but it throws away the time between your actions. This extension keeps it, and it keeps recording across page loads.
