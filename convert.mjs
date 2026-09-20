@@ -10,6 +10,12 @@ import fs from 'fs';
 const [, , inFile = 'recording.json', outFile = 'replay.mjs'] = process.argv;
 const events = JSON.parse(fs.readFileSync(inFile, 'utf8'));
 
+// Text-based selectors (chips, menu items, ...) need the small engine from the extension folder
+const usesTextSelectors = events.some((e) => (e.selectors || []).some((s) => typeof s !== 'string'));
+const engineSource = usesTextSelectors
+  ? fs.readFileSync(new URL('./extension/selector-engine.js', import.meta.url), 'utf8')
+  : null;
+
 const ACTIONS = new Set(['click', 'fill', 'select', 'key']);
 const isAction = (e) => ACTIONS.has(e.type);
 
@@ -98,15 +104,35 @@ import puppeteer from 'puppeteer';
 const SPEED = Number(process.env.SPEED) || 1;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms / SPEED));
 
-// Try each recorded selector in order until one matches.
-async function find(page, selectors, timeout = 5000) {
-  for (const sel of selectors) {
-    try {
-      const el = await page.waitForSelector(sel, { visible: true, timeout });
-      if (el) return el;
-    } catch {}
+${engineSource ? `// Text-based selectors are evaluated inside the page with this code (from extension/selector-engine.js)
+const ENGINE = ${JSON.stringify(engineSource)};
+
+` : ''}// Look up one selector: a CSS string${engineSource ? ', or a text-based object' : ''}
+async function query(page, sel) {
+  if (typeof sel === 'string') return page.$(sel);
+  const handle = await page.evaluateHandle(ENGINE + '\\nctrFind(' + JSON.stringify(sel) + ')');
+  const el = handle.asElement();
+  if (!el) await handle.dispose();
+  return el;
+}
+
+// Try every recorded selector (best first) until one matches a visible element.
+async function find(page, selectors, timeout = 10000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    for (const sel of selectors) {
+      let el = null;
+      try { el = await query(page, sel); } catch {}
+      if (!el) continue;
+      const box = await el.boundingBox().catch(() => null);
+      if (box && box.width > 0 && box.height > 0) return el;
+      await el.dispose();
+    }
+    if (Date.now() > deadline) {
+      throw new Error('Element not found: ' + selectors.map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('  |  '));
+    }
+    await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error('Element not found: ' + selectors.join('  |  '));
 }
 
 async function click(page, selectors, { nav = false } = {}) {
