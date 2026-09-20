@@ -1,4 +1,4 @@
-# Chrome Recorder (and player)
+# Chrome Recorder
 
 ![A recording being replayed in Chrome: a virtual cursor moves through the Graphnote demo app while Puppeteer repeats the recorded clicks and typing](recordmp4.gif)
 
@@ -175,9 +175,10 @@ Other Material components (date pickers, sliders, autocomplete typing, drag and 
 
 Sites lay themselves out differently depending on how big the window is, so the recorder notes the size of the **page area** (the part of the window that shows the page, in CSS pixels, excluding tabs, address bar and bookmarks bar) when you start recording and again at every page load.
 
-The player opens its window at that size and then adjusts it until the page area matches exactly. It measures the page area itself, so it works even if your recording machine and your replay machine have different amounts of browser chrome (a bookmarks bar, a taller title bar, a different operating system). The first size is applied before the "press any key" prompt, so you can see it. If you resized the window while recording, the player resizes at the same page load.
+The player opens Chrome maximized, then resizes the window until the page area matches exactly. It measures the page area itself, so it works even if your recording machine and your replay machine have different amounts of browser chrome (a bookmarks bar, a taller title bar, a different operating system). The first size is applied before the "press any key" prompt, so you can see it. If you resized the window while recording, the player resizes at the same page load.
 
-- A window can't be bigger than the screen. If the recorded size doesn't fit, the player prints `Could not make the page area ... x ...` and carries on with the biggest window it can get.
+- A window can't be bigger than the screen. If the recorded size doesn't fit, the player prints `Could not make the page area ... x ...` and carries on with the biggest window it can get. It never asks for more than the screen has, and always places the window at the top left so it stays on screen.
+- If Chrome refuses to resize, the player prints `Could not resize the window: ...` and carries on with the maximized window.
 - DevTools docked to the side or bottom of the window takes space from the page area. If it was open while you recorded, the recorded page area is the smaller size left over, and the replay window gets that smaller page area too.
 - Browser zoom is not recorded. The size is measured in CSS pixels, so a page zoomed to 110% while recording is replayed at 100% with the same number of CSS pixels, which lays out the same but looks smaller.
 - Recordings made before this feature have no window size, so they open maximized like before.
@@ -234,6 +235,7 @@ The replay starts a fresh Chrome profile, so it has no cookies or login. That is
 | `Could not find Chrome` | Run `npx puppeteer browsers install chrome`, or set `PUPPETEER_EXECUTABLE_PATH` to a `chrome.exe`. |
 | "Failed to load extension: Manifest file is missing" | Select the `extension` folder, not the repository folder. |
 | "Could not attach to this page" | Reload the page and start again. `chrome://` pages and the Chrome Web Store can't be recorded. |
+| The browser window doesn't show up, or only a small Chrome popup (such as the translate bar) is visible | Run with `WINDOW_SIZE=off` (`set WINDOW_SIZE=off` in cmd) to skip the resizing. Please report the `Window:` line the player prints, it shows the size and position it gave the window. |
 | `Element not found: ...` during replay | The page changed or the selector is unstable. Edit that step's `selectors` in `recording.json`. |
 | Recording has fewer events than expected | Make sure you reloaded the page after installing or reloading the extension, and that the actions happened in the recorded tab. |
 | Replay is slower than the recording | The player also waits for elements and page loads. Use `SPEED=1.5` to compensate. |
