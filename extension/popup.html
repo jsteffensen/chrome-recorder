@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { font: 13px system-ui, sans-serif; width: 270px; margin: 0; padding: 14px; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  p { margin: 6px 0 10px; color: #555; }
+  button { width: 100%; padding: 8px; margin-top: 6px; font-size: 13px; cursor: pointer;
+           border-radius: 6px; border: 1px solid #ccc; background: #f6f6f6; }
+  button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+  button.stop { background: #d93025; color: #fff; border-color: #d93025; }
+  [hidden] { display: none !important; }
+  #msg { color: #b3261e; }
+</style>
+<h1>Click Timing Recorder</h1>
+<p id="status">Not recording.</p>
+<button id="start" class="primary">Start recording this tab</button>
+<button id="stop" class="stop">Stop &amp; download</button>
+<button id="download">Download last recording</button>
+<p id="msg"></p>
+<script src="popup.js"></script>
