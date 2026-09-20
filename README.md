@@ -1,6 +1,6 @@
 # Chrome Recorder
 
-![A recording being replayed in Chrome: a virtual cursor moves through the Graphnote demo app while Puppeteer repeats the recorded clicks and typing](recording.gif)
+![A recording being replayed in Chrome: a virtual cursor moves through the Graphnote demo app while Puppeteer repeats the recorded clicks and typing](recordmp4.gif)
 
 Record your clicks, typing and **timing** in Chrome, then replay them with [Puppeteer](https://pptr.dev) at the same pace.
 
