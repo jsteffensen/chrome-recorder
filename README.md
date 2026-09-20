@@ -1,4 +1,4 @@
-# Chrome Recorder
+# Chrome Recorder (and player)
 
 ![A recording being replayed in Chrome: a virtual cursor moves through the Graphnote demo app while Puppeteer repeats the recorded clicks and typing](recordmp4.gif)
 
