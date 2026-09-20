@@ -284,6 +284,15 @@
     if (listening) return;
     listening = true;
     send({ type: 'navigate' });
+    // The size of the page area (CSS pixels) and of the whole window, so the player can recreate it
+    send({
+      type: 'window',
+      width: window.innerWidth,
+      height: window.innerHeight,
+      outerWidth: window.outerWidth,
+      outerHeight: window.outerHeight,
+      pixelRatio: window.devicePixelRatio,
+    });
     if (document.readyState === 'complete') send({ type: 'loaded' });
     else window.addEventListener('load', () => send({ type: 'loaded' }), { once: true });
     document.addEventListener('mousedown', onMouseDown, true);

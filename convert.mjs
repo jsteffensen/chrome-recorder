@@ -16,6 +16,8 @@ const engineSource = usesTextSelectors
   ? fs.readFileSync(new URL('./extension/selector-engine.js', import.meta.url), 'utf8')
   : null;
 
+const windowEvent = events.find((e) => e.type === 'window');
+
 const ACTIONS = new Set(['click', 'fill', 'select', 'key']);
 const isAction = (e) => ACTIONS.has(e.type);
 
@@ -168,7 +170,7 @@ async function pressKey(page, key, { nav = false } = {}) {
 const browser = await puppeteer.launch({ headless: false, defaultViewport: null });
 try {
   const page = await browser.newPage();
-${body.join('\n')}
+${windowEvent ? `  await page.setViewport({ width: ${windowEvent.width}, height: ${windowEvent.height} }); // size of the page when it was recorded\n` : ''}${body.join('\n')}
   await sleep(1000);
 } finally {
   await browser.close();

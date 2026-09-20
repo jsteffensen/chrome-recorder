@@ -1,6 +1,6 @@
 # Chrome Recorder
 
-![A recording being replayed in Chrome: a virtual cursor moves through the Graphnote demo app while Puppeteer repeats the recorded clicks and typing](recording.gif)
+![A recording being replayed in Chrome: a virtual cursor moves through the Graphnote demo app while Puppeteer repeats the recorded clicks and typing](recordmp4.gif)
 
 Record your clicks, typing and **timing** in Chrome, then replay them with [Puppeteer](https://pptr.dev) at the same pace.
 
@@ -51,7 +51,7 @@ Use quotes around the file name, because it contains spaces. In the rest of this
 node player.js <recording.json>
 ```
 
-1. Finds a Chrome to use (see [Which Chrome is used](#which-chrome-is-used)) and opens it.
+1. Finds a Chrome to use (see [Which Chrome is used](#which-chrome-is-used)) and opens it, with its window sized so the page area matches the size it had when you recorded (see [Window size](#window-size)).
 2. Opens the first recorded page and waits. When it says `Page loaded. Press any key to start the replay...`, get the page into the state you want (for example, log in by hand if needed), then press a key in the terminal. `Ctrl+C` cancels.
 3. Runs 200 ms after your key press, then repeats every recorded action with the original pauses.
 4. **Shows what it is doing**, so the replay looks like a screen recording:
@@ -69,6 +69,7 @@ There are no command-line options besides the recording file. These environment 
 | --- | --- |
 | `SPEED=2` | Replay at twice the recorded speed (`0.5` = half speed). The 200 ms start delay is not affected. |
 | `PASSWORD=...` | Text typed into password fields (see [Privacy](#privacy)) |
+| `WINDOW_SIZE=off` | Don't resize the window to the recorded size; open it maximized instead |
 | `VIRTUAL_CURSOR=off` | Don't show the gliding mouse cursor |
 | `CLICK_INDICATOR=off` | Don't draw the amber circle at each click |
 | `PUPPETEER_EXECUTABLE_PATH=...` | Use this exact Chrome |
@@ -131,6 +132,7 @@ Recordings are saved as `recording_<site>_<DD Mmm YYYY - HHMM>.json`:
 | Dropdown (`<select>`) | The chosen value |
 | Enter, Tab, Escape, arrow keys | The key |
 | Page load | The URL and when the page finished loading |
+| Window size | The size of the page area, at the start and at every page load |
 
 Every event carries a millisecond timestamp.
 
@@ -169,6 +171,17 @@ In `recording.json` a text-based selector is an object next to the normal CSS st
 
 Other Material components (date pickers, sliders, autocomplete typing, drag and drop) get the normal treatment described above.
 
+## Window size
+
+Sites lay themselves out differently depending on how big the window is, so the recorder notes the size of the **page area** (the part of the window that shows the page, in CSS pixels, excluding tabs, address bar and bookmarks bar) when you start recording and again at every page load.
+
+The player opens its window at that size and then adjusts it until the page area matches exactly. It measures the page area itself, so it works even if your recording machine and your replay machine have different amounts of browser chrome (a bookmarks bar, a taller title bar, a different operating system). The first size is applied before the "press any key" prompt, so you can see it. If you resized the window while recording, the player resizes at the same page load.
+
+- A window can't be bigger than the screen. If the recorded size doesn't fit, the player prints `Could not make the page area ... x ...` and carries on with the biggest window it can get.
+- DevTools docked to the side or bottom of the window takes space from the page area. If it was open while you recorded, the recorded page area is the smaller size left over, and the replay window gets that smaller page area too.
+- Browser zoom is not recorded. The size is measured in CSS pixels, so a page zoomed to 110% while recording is replayed at 100% with the same number of CSS pixels, which lays out the same but looks smaller.
+- Recordings made before this feature have no window size, so they open maximized like before.
+
 ## How timing works
 
 The player turns the gaps between your recorded actions into pauses:
@@ -187,7 +200,7 @@ node convert.mjs recording.json replay.mjs
 node replay.mjs
 ```
 
-The generated script has the same pacing, but it is simpler than `player.js`: it launches Puppeteer's default Chrome (it does not search for other installs), does not wait for a key press, and closes the browser when it finishes.
+The generated script has the same pacing and sets the recorded page size, but it is simpler than `player.js`: it launches Puppeteer's default Chrome (it does not search for other installs), does not wait for a key press, and closes the browser when it finishes.
 
 ## Works with
 

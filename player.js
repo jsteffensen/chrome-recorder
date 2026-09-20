@@ -43,6 +43,7 @@ try {
 const SPEED = Number(process.env.SPEED) || 1;
 const FIND_TIMEOUT = 10000; // how long to wait for an element to show up
 const SHOW_CLICKS = process.env.CLICK_INDICATOR !== 'off'; // amber circle at every click
+const SIZE_WINDOW = process.env.WINDOW_SIZE !== 'off';     // resize the window to the size it was recorded in
 const SHOW_CURSOR = process.env.VIRTUAL_CURSOR !== 'off';  // a mouse cursor that glides to every click
 const CURSOR_TRAVEL = 1000; // ms before a click at which the cursor starts moving towards it (scaled by SPEED)
 const NAV_TIMEOUT = 30000;  // how long to wait for a page load
@@ -331,6 +332,12 @@ async function replay(page) {
       continue;
     }
 
+    if (e.type === 'window') {
+      // The first one was applied at launch; a later one means the window was resized while recording
+      if (SIZE_WINDOW && e !== firstWindowEvent) await fitWindow(page, e);
+      continue;
+    }
+
     if (e.type === 'loaded') {
       // Think-time is measured from when the page finished loading
       if (!actionSinceLoad) base = e.t;
@@ -375,6 +382,48 @@ async function replay(page) {
     actionSinceLoad = true;
     if (nav) navExpected = true;
   }
+}
+
+// ---------- window size ----------
+
+// The recording notes the size of the page area at the start (and at every page load). The player makes
+// its window match, so the site lays itself out the same way as when it was recorded.
+const firstWindowEvent = SIZE_WINDOW ? events.find((e) => e.type === 'window') : undefined;
+
+let warnedAboutSize = false;
+
+// Resizes the window until the PAGE AREA (not the whole window, which also holds tabs and the address
+// bar) is the recorded size. Only calls Chrome when the size is actually different.
+// Returns true if the page area ended up at the wanted size.
+async function fitWindow(page, wanted) {
+  let cdp;
+  try {
+    cdp = await (page.createCDPSession ? page.createCDPSession() : page.target().createCDPSession());
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    let inner;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      inner = await page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }));
+      const dw = wanted.width - inner.w;
+      const dh = wanted.height - inner.h;
+      if (Math.abs(dw) <= 1 && Math.abs(dh) <= 1) return true;
+      const { bounds } = await cdp.send('Browser.getWindowBounds', { windowId });
+      await cdp.send('Browser.setWindowBounds', {
+        windowId,
+        bounds: { windowState: 'normal', width: bounds.width + dw, height: bounds.height + dh },
+      });
+      await sleep(150); // let the window settle
+    }
+    inner = await page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }));
+    if (Math.abs(wanted.width - inner.w) <= 1 && Math.abs(wanted.height - inner.h) <= 1) return true;
+    if (!warnedAboutSize) {
+      warnedAboutSize = true;
+      console.warn(`Could not make the page area ${wanted.width} x ${wanted.height} (it is ${inner.w} x ${inner.h}); the screen is probably too small.`);
+    }
+  } catch { /* resizing is a nicety; never fail a replay because of it */ }
+  finally {
+    if (cdp) await cdp.detach().catch(() => {});
+  }
+  return false;
 }
 
 // ---------- finding Chrome ----------
@@ -455,15 +504,19 @@ function chooseChrome() {
   }
   console.log(`Using Chrome: ${executablePath}`);
 
-  const browser = await puppeteer.launch({
-    executablePath,
-    headless: false,
-    defaultViewport: null,
-    args: ['--start-maximized'],
-  });
+  // Start the window at the recorded size if there is one (fitWindow fine-tunes it), otherwise maximized
+  const args = firstWindowEvent
+    ? [`--window-size=${firstWindowEvent.outerWidth || firstWindowEvent.width},${firstWindowEvent.outerHeight || firstWindowEvent.height}`, '--window-position=0,0']
+    : ['--start-maximized'];
+  const browser = await puppeteer.launch({ executablePath, headless: false, defaultViewport: null, args });
   try {
     const [first] = await browser.pages();
     const page = first || (await browser.newPage());
+    if (firstWindowEvent) {
+      if (await fitWindow(page, firstWindowEvent)) {
+        console.log(`Window: page area ${firstWindowEvent.width} x ${firstWindowEvent.height}, as recorded`);
+      }
+    }
     if (SHOW_CLICKS) await page.evaluateOnNewDocument(installClickIndicator); // active on every page we open from here on
     await replay(page);
     console.log('Done. The browser stays open; close it (or press Ctrl+C) to exit.');
