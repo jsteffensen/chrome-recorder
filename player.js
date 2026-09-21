@@ -7,10 +7,13 @@
 // Optional environment variables:
 //   SPEED=2       replay at twice the recorded speed (0.5 = half speed)
 //   PASSWORD=...  text typed into password fields (passwords are never stored in a recording)
+//   RECORD_VIDEO=on|off|file.mp4   answer the "record a video?" question up front (see README)
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const readline = require('readline');
+const { spawn, spawnSync, execFile } = require('child_process');
 
 // ---------- input ----------
 if (process.argv.length !== 3) {
@@ -444,6 +447,141 @@ async function fitWindow(page, wanted) {
   }
 }
 
+// ---------- video recording ----------
+
+// The player asks first whether to record the replay as a video (filmed with ffmpeg, which must be on
+// your PATH, or set FFMPEG_PATH). Setting RECORD_VIDEO answers the question up front:
+//   RECORD_VIDEO=on             record, with an automatic file name
+//   RECORD_VIDEO=some\file.mp4     record to that file
+//   RECORD_VIDEO=off            don't record
+// Recording starts once the browser window is open and stops when the script ends: Ctrl+C, or closing the window.
+const RECORD = (process.env.RECORD_VIDEO || '').trim();
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+let recordVideo = RECORD !== '' && !['off', 'no', 'false', '0'].includes(RECORD.toLowerCase());
+
+let recorder = null; // { proc, file, exited, stopping } while a video is being recorded
+
+function videoFile() {
+  if (RECORD && !['on', 'yes', 'true', '1'].includes(RECORD.toLowerCase())) return path.resolve(RECORD);
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const stamp = `${pad(d.getDate())} ${months[d.getMonth()]} ${d.getFullYear()} - ${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  const name = path.basename(file, path.extname(file));
+  return path.join(path.dirname(path.resolve(file)), `${name} - replay ${stamp}.mp4`);
+}
+
+// ffmpeg's gdigrab finds a window by its exact title, so ask Windows for the browser window's title
+async function windowTitle(pid) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const title = await new Promise((resolve) => {
+      execFile(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).MainWindowTitle`],
+        { windowsHide: true },
+        (err, stdout) => resolve(err ? '' : String(stdout).trim())
+      );
+    });
+    if (title) return title;
+    await sleep(300); // the window may not have a title yet
+  }
+  return '';
+}
+
+// Why a video cannot be recorded here, or null if it can
+function videoUnavailableReason() {
+  if (process.platform !== 'win32') return 'video recording is only supported on Windows for now.';
+  const probe = spawnSync(FFMPEG, ['-version'], { windowsHide: true });
+  if (probe.error || probe.status !== 0) return `could not run "${FFMPEG}". Put ffmpeg on your PATH or set FFMPEG_PATH.`;
+  return null;
+}
+
+// Asks a yes/no question in the terminal and waits for y or n followed by Enter
+function askYesNo(question) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    let answered = false;
+    rl.on('SIGINT', () => { rl.close(); process.exit(130); }); // Ctrl+C at the question
+    rl.on('close', () => { if (!answered) resolve(false); });  // input ended without an answer
+    const ask = () => rl.question(question, (text) => {
+      const answer = text.trim().toLowerCase();
+      if (answer === 'y' || answer === 'yes') { answered = true; rl.close(); resolve(true); }
+      else if (answer === 'n' || answer === 'no') { answered = true; rl.close(); resolve(false); }
+      else { console.log('Please type y or n, then press Enter.'); ask(); }
+    });
+    ask();
+  });
+}
+
+// The first step of every replay: should it be filmed? (Skipped when RECORD_VIDEO is set, or when
+// there is no terminal to ask in, for example when the player runs from a script.)
+async function askAboutRecording() {
+  if (RECORD !== '' || !process.stdin.isTTY) return;
+  const why = videoUnavailableReason();
+  if (why) {
+    console.log(`(Video recording is not available: ${why})\n`);
+    return;
+  }
+  recordVideo = await askYesNo('Record this replay as a video? (y/n, then Enter): ');
+  console.log('');
+}
+
+async function startRecording(browser) {
+  if (!recordVideo) return;
+  const skip = (why) => console.warn(`Not recording a video: ${why}`);
+
+  const why = videoUnavailableReason();
+  if (why) return skip(why);
+  const pid = browser.process() && browser.process().pid;
+  const title = pid ? await windowTitle(pid) : '';
+  if (!title) return skip('could not find the title of the browser window.');
+
+  const out = videoFile();
+  const proc = spawn(
+    FFMPEG,
+    [
+      '-y',
+      '-f', 'gdigrab', '-framerate', '30', '-draw_mouse', '0', '-i', `title=${title}`,
+      '-vf', 'crop=trunc(iw/2)*2:trunc(ih/2)*2', // H.264 needs an even width and height
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+      '-movflags', '+frag_keyframe+empty_moov+default_base_moof', // stays playable even if the recording is cut short
+      out,
+    ],
+    { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true }
+  );
+  let stderr = '';
+  proc.stderr.on('data', (d) => { stderr = (stderr + d).slice(-2000); });
+  proc.stdin.on('error', () => {});
+  const exited = new Promise((resolve) => proc.on('exit', resolve));
+  const r = { proc, file: out, exited, stopping: false };
+  const lastLine = () => stderr.trim().split(/\r?\n/).filter(Boolean).pop() || '(no message)';
+
+  // If ffmpeg cannot start (wrong window title, unsupported build, ...) it exits right away
+  const early = await Promise.race([exited, sleep(1500).then(() => null)]);
+  if (early !== null) return skip(`ffmpeg stopped immediately: ${lastLine()}`);
+
+  recorder = r;
+  exited.then(() => {
+    if (!r.stopping) console.warn(`\nffmpeg stopped unexpectedly: ${lastLine()}`);
+  });
+  console.log(`Recording video: ${out}`);
+  browser.on('disconnected', () => { stopRecording(); }); // the window was closed
+  process.on('exit', () => { // last resort: tell ffmpeg to finish even if we did not get to do it properly
+    if (!r.stopping) { try { r.proc.stdin.write('q'); } catch { /* already gone */ } }
+  });
+}
+
+// Asks ffmpeg to finish, so the video file is complete
+async function stopRecording() {
+  const r = recorder;
+  if (!r || r.stopping) return;
+  r.stopping = true;
+  try { r.proc.stdin.write('q'); r.proc.stdin.end(); } catch { /* already gone */ }
+  const finished = await Promise.race([r.exited.then(() => true), sleep(10000).then(() => false)]);
+  if (!finished) r.proc.kill();
+  console.log(`Video saved: ${r.file}`);
+}
+
 // ---------- finding Chrome ----------
 
 // Puppeteer wants one specific Chrome version and fails if it isn't installed. Instead of failing,
@@ -511,6 +649,7 @@ function chooseChrome() {
 }
 
 (async () => {
+  // Finding Chrome prints nothing, so the question below really is the first thing you see
   const executablePath = chooseChrome();
   if (!executablePath) {
     console.error(
@@ -520,9 +659,20 @@ function chooseChrome() {
     );
     process.exit(1);
   }
+
+  await askAboutRecording(); // step 1: film this replay?
   console.log(`Using Chrome: ${executablePath}`);
 
-  const browser = await puppeteer.launch({ executablePath, headless: false, defaultViewport: null, args: ['--start-maximized'] });
+  const browser = await puppeteer.launch({ executablePath, headless: false, defaultViewport: null, args: ['--start-maximized'], handleSIGINT: false });
+
+  // Ctrl+C: finish the video first, then close the browser
+  process.on('SIGINT', async () => {
+    console.log('\nStopping...');
+    await stopRecording();
+    await browser.close().catch(() => {});
+    process.exit(130);
+  });
+
   try {
     const [first] = await browser.pages();
     const page = first || (await browser.newPage());
@@ -533,13 +683,18 @@ function chooseChrome() {
       const at = bounds ? ` (window ${bounds.width} x ${bounds.height} at ${bounds.left}, ${bounds.top})` : '';
       if (ok) console.log(`Window: page area ${firstWindowEvent.width} x ${firstWindowEvent.height}, as recorded${at}`);
     }
+    await startRecording(browser); // the window is open and sized: start filming
     if (SHOW_CLICKS) await page.evaluateOnNewDocument(installClickIndicator); // active on every page we open from here on
     await replay(page);
     console.log('Done. The browser stays open; close it (or press Ctrl+C) to exit.');
   } catch (err) {
     console.error('\nReplay failed: ' + err.message);
     process.exitCode = 1;
-    if (err.cancelled) await browser.close();
-    else console.error('The browser was left open so you can see where it stopped. Close it (or press Ctrl+C) to exit.');
+    if (err.cancelled) {
+      await stopRecording();
+      await browser.close();
+    } else {
+      console.error('The browser was left open so you can see where it stopped. Close it (or press Ctrl+C) to exit.');
+    }
   }
 })();

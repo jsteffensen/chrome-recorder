@@ -51,13 +51,14 @@ Use quotes around the file name, because it contains spaces. In the rest of this
 node player.js <recording.json>
 ```
 
-1. Finds a Chrome to use (see [Which Chrome is used](#which-chrome-is-used)) and opens it, with its window sized so the page area matches the size it had when you recorded (see [Window size](#window-size)).
-2. Opens the first recorded page and waits. When it says `Page loaded. Press any key to start the replay...`, get the page into the state you want (for example, log in by hand if needed), then press a key in the terminal. `Ctrl+C` cancels.
-3. Runs 200 ms after your key press, then repeats every recorded action with the original pauses.
-4. **Shows what it is doing**, so the replay looks like a screen recording:
+1. **Asks whether to record the replay as a video.** Type `y` or `n` and press Enter (see [Recording a video](#recording-a-video-of-the-replay)). The question is only asked if ffmpeg is available, and is skipped when there is no terminal to ask in or when `RECORD_VIDEO` is set.
+2. Finds a Chrome to use (see [Which Chrome is used](#which-chrome-is-used)) and opens it, with its window sized so the page area matches the size it had when you recorded (see [Window size](#window-size)).
+3. Opens the first recorded page and waits. When it says `Page loaded. Press any key to start the replay...`, get the page into the state you want (for example, log in by hand if needed), then press a key in the terminal. `Ctrl+C` cancels.
+4. Runs 200 ms after your key press, then repeats every recorded action with the original pauses.
+5. **Shows what it is doing**, so the replay looks like a screen recording:
    - A **virtual cursor** (an arrow) sits on the page. It stays where the last click happened, and starts gliding to the next click 1000 ms before it (less if the pause is shorter, and scaled by `SPEED`). Before the first click it starts in the middle of the window.
    - Every click draws an **amber circle** that grows from nothing to 75 px and fades out over 500 ms.
-5. **Leaves the browser open** when it finishes, so you can look at the result. Close the window or press `Ctrl+C` to exit. If a step fails, the browser also stays open so you can see where it stopped.
+6. **Leaves the browser open** when it finishes, so you can look at the result. Close the window or press `Ctrl+C` to exit. If a step fails, the browser also stays open so you can see where it stopped.
 
 Each step is printed as it runs, for example `[2/4] fill "#urgent" (after 1225 ms)`.
 
@@ -70,6 +71,8 @@ There are no command-line options besides the recording file. These environment 
 | `SPEED=2` | Replay at twice the recorded speed (`0.5` = half speed). The 200 ms start delay is not affected. |
 | `PASSWORD=...` | Text typed into password fields (see [Privacy](#privacy)) |
 | `WINDOW_SIZE=off` | Don't resize the window to the recorded size; open it maximized instead |
+| `RECORD_VIDEO=on` | Answer the "record a video?" question in advance, so it isn't asked. `on` records, `off` doesn't, and a path ending in `.mp4` records to that file (see [Recording a video](#recording-a-video-of-the-replay)) |
+| `FFMPEG_PATH=...` | Use this ffmpeg instead of the one on your `PATH` |
 | `VIRTUAL_CURSOR=off` | Don't show the gliding mouse cursor |
 | `CLICK_INDICATOR=off` | Don't draw the amber circle at each click |
 | `PUPPETEER_EXECUTABLE_PATH=...` | Use this exact Chrome |
@@ -89,6 +92,27 @@ node player.js recording.json
 # macOS / Linux
 SPEED=2 node player.js recording.json
 ```
+
+## Recording a video of the replay
+
+If [ffmpeg](https://ffmpeg.org/) is on your `PATH` (or you set `FFMPEG_PATH`), the player can film its own browser window. Asking is the very first thing it does:
+
+```
+Record this replay as a video? (y/n, then Enter):
+```
+
+Type `y` or `n` and press Enter (anything else asks again). `Ctrl+C` quits. After your answer, the player opens the browser and carries on with the next steps.
+
+- **Skipping the question:** set `RECORD_VIDEO` to answer in advance, which is useful when the player runs from a script. `set RECORD_VIDEO=on` records, `set RECORD_VIDEO=off` doesn't. Without a terminal to ask in (input piped in, or a scheduled task), the player doesn't ask and doesn't record unless `RECORD_VIDEO` says so.
+- **Not available:** if ffmpeg can't be run, or you are not on Windows, the player says so instead of asking, and replays normally.
+- **Start:** recording begins as soon as the browser window is open and sized, before the first page loads and before the "press any key" prompt. Trim the start in a video editor if you need to.
+- **Stop:** recording stops when the script ends: when you close the browser window, or press `Ctrl+C` in the terminal. The player tells ffmpeg to finish properly, and prints `Video saved: ...`.
+- **File:** with `RECORD_VIDEO=on` the video is saved next to the recording file, named like `recording_demo.graphnote.io_20 Sep 2026 - 2325 - replay 21 Sep 2026 - 151514.mp4`. To choose the file yourself, set `RECORD_VIDEO` to a path ending in `.mp4`.
+- **What it captures:** the whole browser window, including the tabs and address bar, at 30 frames per second, as H.264. The virtual cursor and the amber click circles are part of the page, so they are in the video. The real mouse pointer is not.
+- **Fragmented MP4:** the file is written as a fragmented MP4, so it still plays if the recording is cut short (for example when the terminal is closed). Some video editors want a regular MP4; convert it with `ffmpeg -i in.mp4 -c copy out.mp4`.
+- **Only on Windows for now.** It uses ffmpeg's `gdigrab` to capture the window by its title. On other systems the player prints `Not recording a video` and replays normally. It also does this if ffmpeg can't be run or can't find the window, so a recording problem never stops a replay.
+- Keep the window visible while recording: a minimized window can't be captured. Don't resize it while recording.
+- To make a GIF for your own README: `ffmpeg -i replay.mp4 -vf "fps=15,scale=800:-1:flags=lanczos" replay.gif`.
 
 ## Which Chrome is used
 
@@ -236,6 +260,7 @@ The replay starts a fresh Chrome profile, so it has no cookies or login. That is
 | "Failed to load extension: Manifest file is missing" | Select the `extension` folder, not the repository folder. |
 | "Could not attach to this page" | Reload the page and start again. `chrome://` pages and the Chrome Web Store can't be recorded. |
 | The browser window doesn't show up, or only a small Chrome popup (such as the translate bar) is visible | Run with `WINDOW_SIZE=off` (`set WINDOW_SIZE=off` in cmd) to skip the resizing. Please report the `Window:` line the player prints, it shows the size and position it gave the window. |
+| The video is all black, or `Not recording a video: ffmpeg stopped immediately: ...` | ffmpeg captures the window by its title with `gdigrab`. Make sure you use a recent ffmpeg build, and that the browser window is visible on screen. Black frames can happen with GPU-accelerated windows on some systems. |
 | `Element not found: ...` during replay | The page changed or the selector is unstable. Edit that step's `selectors` in `recording.json`. |
 | Recording has fewer events than expected | Make sure you reloaded the page after installing or reloading the extension, and that the actions happened in the recorded tab. |
 | Replay is slower than the recording | The player also waits for elements and page loads. Use `SPEED=1.5` to compensate. |
