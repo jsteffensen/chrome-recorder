@@ -73,6 +73,7 @@ There are no command-line options besides the recording file. These environment 
 | `WINDOW_SIZE=off` | Don't resize the window to the recorded size; open it maximized instead |
 | `RECORD_VIDEO=on` | Answer the "record a video?" question in advance, so it isn't asked. `on` records, `off` doesn't, and a path ending in `.mp4` records to that file (see [Recording a video](#recording-a-video-of-the-replay)) |
 | `FFMPEG_PATH=...` | Use this ffmpeg instead of the one on your `PATH` |
+| `RECORD_MODE=desktop` or `title` | Film with only one method instead of trying both |
 | `VIRTUAL_CURSOR=off` | Don't show the gliding mouse cursor |
 | `CLICK_INDICATOR=off` | Don't draw the amber circle at each click |
 | `PUPPETEER_EXECUTABLE_PATH=...` | Use this exact Chrome |
@@ -108,10 +109,12 @@ Type `y` or `n` and press Enter (anything else asks again). `Ctrl+C` quits. Afte
 - **Start:** recording begins as soon as the browser window is open and sized, before the first page loads and before the "press any key" prompt. Trim the start in a video editor if you need to.
 - **Stop:** recording stops when the script ends: when you close the browser window, or press `Ctrl+C` in the terminal. The player tells ffmpeg to finish properly, and prints `Video saved: ...`.
 - **File:** with `RECORD_VIDEO=on` the video is saved next to the recording file, named like `recording_demo.graphnote.io_20 Sep 2026 - 2325 - replay 21 Sep 2026 - 151514.mp4`. To choose the file yourself, set `RECORD_VIDEO` to a path ending in `.mp4`.
-- **What it captures:** the whole browser window, including the tabs and address bar, at 30 frames per second, as H.264. The virtual cursor and the amber click circles are part of the page, so they are in the video. The real mouse pointer is not.
+- **What it captures:** the browser window, including the tabs and address bar, at 30 frames per second, as H.264. The virtual cursor and the amber click circles are part of the page, so they are in the video. The real mouse pointer is not.
+- **How:** ffmpeg's `gdigrab` films only the part of the desktop where the browser window is, not the whole desktop or your other monitors. The player asks Windows for the window's exact position in real pixels (across all monitors, so a second monitor to the left or above works), and asks ffmpeg how big the desktop is on its side, so it also works with display scaling (150% and so on). The invisible resize borders around the window are left out. It prints what it chose, for example `Recording video (desktop area 2254 x 1900 at 12,0)`, which is the size of the video and the position of its top left corner on your desktop. Because it films the desktop, **nothing may cover the browser window** while recording: don't drag other windows over it. The player brings the browser back to the front after you press a key.
+- **Fallback:** if that fails, the player tries to film the window by its title instead, which nothing can cover but which doesn't work for every GPU-accelerated window. If both fail, it prints ffmpeg's error for each and replays without a video. `RECORD_MODE=desktop` or `RECORD_MODE=title` uses only one of the two methods.
 - **Fragmented MP4:** the file is written as a fragmented MP4, so it still plays if the recording is cut short (for example when the terminal is closed). Some video editors want a regular MP4; convert it with `ffmpeg -i in.mp4 -c copy out.mp4`.
-- **Only on Windows for now.** It uses ffmpeg's `gdigrab` to capture the window by its title. On other systems the player prints `Not recording a video` and replays normally. It also does this if ffmpeg can't be run or can't find the window, so a recording problem never stops a replay.
-- Keep the window visible while recording: a minimized window can't be captured. Don't resize it while recording.
+- **Only on Windows for now.** On other systems the player says video recording isn't available and replays normally. It also does this if ffmpeg can't be run or can't start, so a recording problem never stops a replay.
+- Keep the window visible while recording (a minimized window can't be captured) and don't resize it.
 - To make a GIF for your own README: `ffmpeg -i replay.mp4 -vf "fps=15,scale=800:-1:flags=lanczos" replay.gif`.
 
 ## Which Chrome is used
@@ -260,7 +263,8 @@ The replay starts a fresh Chrome profile, so it has no cookies or login. That is
 | "Failed to load extension: Manifest file is missing" | Select the `extension` folder, not the repository folder. |
 | "Could not attach to this page" | Reload the page and start again. `chrome://` pages and the Chrome Web Store can't be recorded. |
 | The browser window doesn't show up, or only a small Chrome popup (such as the translate bar) is visible | Run with `WINDOW_SIZE=off` (`set WINDOW_SIZE=off` in cmd) to skip the resizing. Please report the `Window:` line the player prints, it shows the size and position it gave the window. |
-| The video is all black, or `Not recording a video: ffmpeg stopped immediately: ...` | ffmpeg captures the window by its title with `gdigrab`. Make sure you use a recent ffmpeg build, and that the browser window is visible on screen. Black frames can happen with GPU-accelerated windows on some systems. |
+| `Not recording a video: ...` | The message lists ffmpeg's error for each method it tried. Make sure ffmpeg runs from the terminal (`ffmpeg -version`) and is a recent build. Send the message along if you need help reading it. |
+| The video shows another window on top of the browser | The video films the desktop area of the browser window, so keep other windows away from it while recording. |
 | `Element not found: ...` during replay | The page changed or the selector is unstable. Edit that step's `selectors` in `recording.json`. |
 | Recording has fewer events than expected | Make sure you reloaded the page after installing or reloading the extension, and that the actions happened in the recorded tab. |
 | Replay is slower than the recording | The player also waits for elements and page loads. Use `SPEED=1.5` to compensate. |

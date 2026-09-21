@@ -321,6 +321,7 @@ async function replay(page) {
         await page.goto(e.url, { waitUntil: 'load', timeout: NAV_TIMEOUT });
         started = true;
         await waitForKey('Page loaded. Press any key to start the replay...');
+        await page.bringToFront(); // the terminal may be covering the browser now
         justStarted = true;
       } else if (actionSinceLoad && !navExpected) {
         // A page load that no click caused (typed URL or reload)
@@ -526,22 +527,117 @@ async function askAboutRecording() {
   console.log('');
 }
 
-async function startRecording(browser) {
-  if (!recordVideo) return;
-  const skip = (why) => console.warn(`Not recording a video: ${why}`);
+// Where the browser window is on screen, in REAL pixels and across all monitors, straight from Windows:
+// { left, top, right, bottom, virtual: { left, top, width, height } } where "virtual" is the area covered by
+// all monitors together. Chrome's own numbers are not used because they are scaled by the display scaling
+// and only know about one monitor. Returns null if Windows cannot say.
+function windowRect(pid) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinInfo {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attribute, out RECT rect, int size);
+}
+'@
+# report real pixels on every monitor, not scaled ones (per-monitor aware; the older call is the fallback)
+try { [void][WinInfo]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch { [void][WinInfo]::SetProcessDPIAware() }
+$h = [IntPtr]::Zero
+for ($i = 0; $i -lt 10 -and $h -eq [IntPtr]::Zero; $i++) {
+  $h = (Get-Process -Id ${pid}).MainWindowHandle
+  if ($h -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 300 }
+}
+if ($h -eq [IntPtr]::Zero) { exit 2 }
+$r = New-Object WinInfo+RECT
+# the visible frame of the window (without the invisible resize borders), or the plain window rectangle
+if ([WinInfo]::DwmGetWindowAttribute($h, 9, [ref]$r, 16) -ne 0) { [void][WinInfo]::GetWindowRect($h, [ref]$r) }
+'{0} {1} {2} {3} {4} {5} {6} {7}' -f $r.Left, $r.Top, $r.Right, $r.Bottom, [WinInfo]::GetSystemMetrics(76), [WinInfo]::GetSystemMetrics(77), [WinInfo]::GetSystemMetrics(78), [WinInfo]::GetSystemMetrics(79)
+`;
+  return new Promise((resolve) => {
+    execFile(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+      { windowsHide: true, timeout: 30000 },
+      (err, stdout) => {
+        const n = err ? [] : String(stdout).trim().split(/\s+/).map(Number);
+        if (n.length !== 8 || n.some(Number.isNaN)) return resolve(null);
+        resolve({ left: n[0], top: n[1], right: n[2], bottom: n[3], virtual: { left: n[4], top: n[5], width: n[6], height: n[7] } });
+      }
+    );
+  });
+}
 
-  const why = videoUnavailableReason();
-  if (why) return skip(why);
+// The size of everything ffmpeg captures when it films "desktop": ALL monitors together. Depending on the
+// ffmpeg build and the display scaling it may count real pixels or scaled ones, so ask it.
+function ffmpegDesktopSize() {
+  const probe = spawnSync(
+    FFMPEG,
+    ['-hide_banner', '-f', 'gdigrab', '-framerate', '1', '-i', 'desktop', '-frames:v', '1', '-f', 'null', '-'],
+    { encoding: 'utf8', windowsHide: true, timeout: 15000 }
+  );
+  const m = /Stream #0:0[^\n]*Video:[^\n]*?\b(\d{3,5})x(\d{3,5})\b/.exec(String(probe.stderr || ''));
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
+}
+
+// Method 1: film just the part of the desktop where the browser window is. Works for any window,
+// including GPU-accelerated ones, as long as nothing is on top of it.
+async function desktopInput(browser) {
+  const pid = browser.process() && browser.process().pid;
+  if (!pid) throw new Error('could not find the browser process');
+  const rect = await windowRect(pid);
+  if (!rect) throw new Error('could not read the window position from Windows');
+  const desktop = ffmpegDesktopSize();
+  if (!desktop) throw new Error('could not read the desktop size from ffmpeg');
+
+  // ffmpeg's pixels per real pixel: 1 if it counts real pixels, less than 1 if it counts scaled ones.
+  // Both the width and the height of all monitors together must agree, otherwise something is off.
+  const k = desktop.w / rect.virtual.width;
+  if (k <= 0.2 || k > 1.05 || Math.abs(desktop.h / rect.virtual.height - k) > 0.02) {
+    throw new Error(`the desktop is ${desktop.w} x ${desktop.h} for ffmpeg but ${rect.virtual.width} x ${rect.virtual.height} for Windows`);
+  }
+
+  // The window's rectangle in ffmpeg's numbers, kept inside the desktop (which may start at a negative
+  // position when a monitor sits to the left of, or above, the main one)
+  const minX = Math.round(rect.virtual.left * k);
+  const minY = Math.round(rect.virtual.top * k);
+  const x0 = Math.max(minX, Math.round(rect.left * k));
+  const y0 = Math.max(minY, Math.round(rect.top * k));
+  const x1 = Math.min(minX + desktop.w, Math.round(rect.right * k));
+  const y1 = Math.min(minY + desktop.h, Math.round(rect.bottom * k));
+  const width = x1 - x0;
+  const height = y1 - y0;
+  if (width < 100 || height < 100) throw new Error(`the window area looks wrong (${width} x ${height})`);
+  return {
+    label: `desktop area ${width} x ${height} at ${x0},${y0}`,
+    args: ['-f', 'gdigrab', '-framerate', '30', '-draw_mouse', '0', '-offset_x', String(x0), '-offset_y', String(y0), '-video_size', `${width}x${height}`, '-i', 'desktop'],
+  };
+}
+
+// Method 2: film the window itself, found by its title. Nothing can cover it, but some GPU-accelerated
+// windows cannot be captured this way.
+async function titleInput(browser) {
   const pid = browser.process() && browser.process().pid;
   const title = pid ? await windowTitle(pid) : '';
-  if (!title) return skip('could not find the title of the browser window.');
+  if (!title) throw new Error('could not find the title of the browser window');
+  return {
+    label: `window "${title}"`,
+    args: ['-f', 'gdigrab', '-framerate', '30', '-draw_mouse', '0', '-i', `title=${title}`],
+  };
+}
 
-  const out = videoFile();
+// Starts ffmpeg on the given input and returns { proc, file, exited, stopping, lastLines }
+function launchFfmpeg(inputArgs, out) {
   const proc = spawn(
     FFMPEG,
     [
       '-y',
-      '-f', 'gdigrab', '-framerate', '30', '-draw_mouse', '0', '-i', `title=${title}`,
+      ...inputArgs,
       '-vf', 'crop=trunc(iw/2)*2:trunc(ih/2)*2', // H.264 needs an even width and height
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
       '-movflags', '+frag_keyframe+empty_moov+default_base_moof', // stays playable even if the recording is cut short
@@ -550,25 +646,54 @@ async function startRecording(browser) {
     { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true }
   );
   let stderr = '';
-  proc.stderr.on('data', (d) => { stderr = (stderr + d).slice(-2000); });
+  proc.stderr.on('data', (d) => { stderr = (stderr + d).slice(-4000); });
   proc.stdin.on('error', () => {});
   const exited = new Promise((resolve) => proc.on('exit', resolve));
-  const r = { proc, file: out, exited, stopping: false };
-  const lastLine = () => stderr.trim().split(/\r?\n/).filter(Boolean).pop() || '(no message)';
+  const lastLines = (n = 4) => stderr.trim().split(/\r?\n/).filter(Boolean).slice(-n).join(' | ') || '(no message)';
+  return { proc, file: out, exited, stopping: false, lastLines };
+}
 
-  // If ffmpeg cannot start (wrong window title, unsupported build, ...) it exits right away
-  const early = await Promise.race([exited, sleep(1500).then(() => null)]);
-  if (early !== null) return skip(`ffmpeg stopped immediately: ${lastLine()}`);
+// RECORD_MODE=desktop or RECORD_MODE=title picks one method; by default the desktop method is tried first
+const RECORD_MODE = (process.env.RECORD_MODE || '').trim().toLowerCase();
 
-  recorder = r;
-  exited.then(() => {
-    if (!r.stopping) console.warn(`\nffmpeg stopped unexpectedly: ${lastLine()}`);
-  });
-  console.log(`Recording video: ${out}`);
-  browser.on('disconnected', () => { stopRecording(); }); // the window was closed
-  process.on('exit', () => { // last resort: tell ffmpeg to finish even if we did not get to do it properly
-    if (!r.stopping) { try { r.proc.stdin.write('q'); } catch { /* already gone */ } }
-  });
+async function startRecording(browser) {
+  if (!recordVideo) return;
+  const skip = (why) => console.warn(`Not recording a video: ${why}`);
+  const why = videoUnavailableReason();
+  if (why) return skip(why);
+
+  const out = videoFile();
+  const methods = RECORD_MODE === 'title' ? ['title'] : RECORD_MODE === 'desktop' ? ['desktop'] : ['desktop', 'title'];
+  const problems = [];
+
+  for (const method of methods) {
+    let input;
+    try {
+      input = method === 'desktop' ? await desktopInput(browser) : await titleInput(browser);
+    } catch (err) {
+      problems.push(`${method}: ${err.message}`);
+      continue;
+    }
+    const r = launchFfmpeg(input.args, out);
+    // If ffmpeg cannot start on this input it exits right away: report why and try the next method
+    const early = await Promise.race([r.exited, sleep(1500).then(() => null)]);
+    if (early !== null) {
+      problems.push(`${method} (${input.label}): ${r.lastLines()}`);
+      continue;
+    }
+
+    recorder = r;
+    r.exited.then(() => {
+      if (!r.stopping) console.warn(`\nffmpeg stopped unexpectedly: ${r.lastLines()}`);
+    });
+    console.log(`Recording video (${input.label}): ${out}`);
+    browser.on('disconnected', () => { stopRecording(); }); // the window was closed
+    process.on('exit', () => { // last resort: tell ffmpeg to finish even if we did not get to do it properly
+      if (!r.stopping) { try { r.proc.stdin.write('q'); } catch { /* already gone */ } }
+    });
+    return;
+  }
+  skip(`\n  ${problems.join('\n  ')}`);
 }
 
 // Asks ffmpeg to finish, so the video file is complete
@@ -639,18 +764,19 @@ function findSystemChrome() {
 }
 
 // Order: PUPPETEER_EXECUTABLE_PATH, the version Puppeteer expects, any cached Chrome, installed Chrome.
-function chooseChrome() {
+async function chooseChrome() {
   if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
   try {
-    const expected = puppeteer.executablePath();
-    if (expected && fs.existsSync(expected)) return expected;
+    // In current Puppeteer versions executablePath() is asynchronous, so it has to be awaited
+    const expected = await puppeteer.executablePath();
+    if (typeof expected === 'string' && expected && fs.existsSync(expected)) return expected;
   } catch { /* no default available */ }
   return findCachedChrome() || findSystemChrome();
 }
 
 (async () => {
   // Finding Chrome prints nothing, so the question below really is the first thing you see
-  const executablePath = chooseChrome();
+  const executablePath = await chooseChrome();
   if (!executablePath) {
     console.error(
       'Could not find Chrome. Either:\n' +
